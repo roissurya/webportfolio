@@ -515,7 +515,7 @@ function About() {
         </div>
         <div className="col-span-7 pl-12 max-md:pl-0">
           <div className="aspect-[16/9] bg-[#1c1b1b] overflow-hidden">
-            <img src="philippe-mignot-Afqw8XrP1V8-unsplash.jpg" alt="Rois Surya at work" className="w-full h-full object-cover" style={{ filter: "grayscale(20%)" }} />
+            <img src="https://isbonmjlvdreuixrgcfw.supabase.co/storage/v1/object/public/portfolio/philippe-mignot-Afqw8XrP1V8-unsplash.jpg" alt="Rois Surya at work" className="w-full h-full object-cover" style={{ filter: "grayscale(20%)" }} />
           </div>
         </div>
       </div>
