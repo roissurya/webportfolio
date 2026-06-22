@@ -120,42 +120,48 @@ const CATS = ["All", "Print Design", "Brand Identity", "Editorial", "Packaging",
 const SKILL_CATS = ["Soft Skill", "Hard Skill", "Tool", "Language"] as const;
 const PWD = "rois2024";
 
-// ─── Storage Upload ────────────────────────────────────────────────────────────
+// ─── Image → compressed base64 (no Storage bucket needed) ───────────────────
 
-async function uploadFile(file: File, bucket = "portfolio"): Promise<string> {
-  const ext = file.name.split(".").pop() ?? "jpg";
-  const path = `uploads/${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
-  // Try PUT first (update), fallback to POST (create)
-  for (const method of ["POST", "PUT"] as const) {
-    const r = await fetch(`${SUPABASE_URL}/storage/v1/object/${bucket}/${path}`, {
-      method,
-      headers: {
-        "Authorization": `Bearer ${publicAnonKey}`,
-        "apikey": publicAnonKey,
-        "Content-Type": file.type,
-        "x-upsert": "true",
-        "cache-control": "3600",
-      },
-      body: file,
-    });
-    if (r.ok) return `${SUPABASE_URL}/storage/v1/object/public/${bucket}/${path}`;
-    const txt = await r.text();
-    // If bucket not found, surface clear error
-    if (txt.includes("Bucket not found") || txt.includes("bucket")) {
-      throw new Error("BUCKET_NOT_FOUND");
-    }
-  }
-  throw new Error("UPLOAD_FAILED");
+function fileToBase64(file: File, maxWidth = 1200): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        const scale = Math.min(1, maxWidth / img.width);
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        const ctx = canvas.getContext("2d")!;
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/jpeg", 0.82));
+      };
+      img.onerror = reject;
+      img.src = e.target?.result as string;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
 }
 
-// ─── Data Hook ────────────────────────────────────────────────────────────────
+// For non-image files (PDF) — just return object URL (session only, user should paste URL instead)
+async function uploadFile(file: File): Promise<string> {
+  if (file.type.startsWith("image/")) {
+    return fileToBase64(file);
+  }
+  // PDF: create a temporary object URL — remind user to use URL field for PDFs
+  return URL.createObjectURL(file);
+}
+
+// ─── Data Hook — Supabase only ────────────────────────────────────────────────
 
 function useData() {
-  const [projects, setProjects] = useState<Project[]>(SEED_PROJECTS);
-  const [cv, setCV] = useState<CVData>(SEED_CV);
+  const [projects,  setProjects]  = useState<Project[]>(SEED_PROJECTS);
+  const [cv,        setCV]        = useState<CVData>(SEED_CV);
   const [showcases, setShowcases] = useState<Showcase[]>(SEED_SHOWCASES);
   const [heroPhoto, setHeroPhoto] = useState<string>("");
-  const [ready, setReady] = useState(false);
+  const [ready,     setReady]     = useState(false);
+  const [saveError, setSaveError] = useState(false);
 
   useEffect(() => {
     Promise.all([
@@ -168,15 +174,25 @@ function useData() {
       if (c && typeof c === "object" && Object.keys(c).length) setCV(c);
       if (Array.isArray(s) && s.length) setShowcases(s);
       if (h?.url) setHeroPhoto(h.url);
-    }).catch(() => {}).finally(() => setReady(true));
+    }).catch(() => setSaveError(true))
+      .finally(() => setReady(true));
   }, []);
 
-  const saveProjects = (p: Project[]) => { setProjects(p); kvSet("rois:projects", p).catch(() => {}); };
-  const saveCV = (c: CVData) => { setCV(c); kvSet("rois:cv", c).catch(() => {}); };
-  const saveShowcases = (s: Showcase[]) => { setShowcases(s); kvSet("rois:showcases", s).catch(() => {}); };
-  const saveHeroPhoto = (url: string) => { setHeroPhoto(url); kvSet("rois:hero", { url }).catch(() => {}); };
+  const persist = async (key: string, value: any) => {
+    try {
+      await kvSet(key, value);
+      setSaveError(false);
+    } catch {
+      setSaveError(true);
+    }
+  };
 
-  return { projects, cv, showcases, heroPhoto, ready, saveProjects, saveCV, saveShowcases, saveHeroPhoto };
+  const saveProjects  = (p: Project[])  => { setProjects(p);  persist("rois:projects",  p); };
+  const saveCV        = (c: CVData)     => { setCV(c);        persist("rois:cv",        c); };
+  const saveShowcases = (s: Showcase[]) => { setShowcases(s); persist("rois:showcases", s); };
+  const saveHeroPhoto = (url: string)   => { setHeroPhoto(url); persist("rois:hero", { url }); };
+
+  return { projects, cv, showcases, heroPhoto, ready, saveError, saveProjects, saveCV, saveShowcases, saveHeroPhoto };
 }
 
 // ─── Grid ─────────────────────────────────────────────────────────────────────
@@ -718,12 +734,7 @@ function AdminHeroPhoto({ heroPhoto, onSave }: { heroPhoto: string; onSave: (url
       const u = await uploadFile(files[0]);
       setUrl(u); onSave(u);
     } catch (e: any) {
-      const msg = e?.message ?? "";
-      if (msg === "BUCKET_NOT_FOUND") {
-        alert("Bucket 'portfolio' belum dibuat.\n\nCara buat:\n1. Buka supabase.com/dashboard\n2. Klik Storage → New bucket\n3. Nama: portfolio\n4. Aktifkan 'Public bucket'\n5. Klik Save");
-      } else {
-        alert("Upload gagal: " + msg);
-      }
+      alert("Upload gagal: " + (e?.message ?? "unknown error"));
     }
     finally { setUploading(false); if (ref.current) ref.current.value = ""; }
   };
@@ -731,7 +742,7 @@ function AdminHeroPhoto({ heroPhoto, onSave }: { heroPhoto: string; onSave: (url
   return (
     <div className="p-6 max-w-lg">
       <p className="text-xs font-semibold tracking-[0.1em] uppercase text-[#8e9192] mb-6" style={{ fontFamily: "Inter" }}>Hero Photo</p>
-      <p className="text-[13px] text-[#8e9192] mb-6" style={{ fontFamily: "Inter" }}>Upload foto profil Anda untuk ditampilkan di bagian kanan hero halaman utama.</p>
+      <p className="text-[13px] text-[#8e9192] mb-6" style={{ fontFamily: "Inter" }}>Upload foto dari komputer (JPG/PNG). Foto dikompresi dan disimpan langsung ke database — tidak perlu Storage bucket.</p>
 
       <input ref={ref} type="file" accept="image/*" className="hidden" onChange={(e) => handleUpload(e.target.files)} />
       <button onClick={() => ref.current?.click()} disabled={uploading} className="flex items-center gap-2 border border-white/[0.12] text-[#8e9192] px-5 py-3 text-xs font-semibold tracking-[0.08em] uppercase hover:text-white hover:border-white/30 transition-colors mb-4 w-full justify-center" style={{ fontFamily: "Inter" }}>
@@ -790,12 +801,7 @@ function AdminShowcases({ showcases, onSave }: { showcases: Showcase[]; onSave: 
       if (target === "cover") { setEditing({ ...editing, coverImage: u }); }
       else { const sl: Slide = { id: crypto.randomUUID(), type: files[0].type.includes("pdf") ? "pdf" : "image", url: u, caption: files[0].name.replace(/\.[^.]+$/, "") }; setEditing({ ...editing, slides: [...editing.slides, sl] }); }
     } catch (e: any) {
-      const msg = e?.message ?? "";
-      if (msg === "BUCKET_NOT_FOUND") {
-        alert("Bucket 'portfolio' belum dibuat.\n\nCara buat:\n1. Buka supabase.com/dashboard\n2. Klik Storage → New bucket\n3. Nama: portfolio\n4. Aktifkan 'Public bucket'\n5. Klik Save");
-      } else {
-        alert("Upload gagal: " + msg);
-      }
+      alert("Upload gagal: " + (e?.message ?? "unknown error"));
     }
     finally { setUploading(false); if (fileRef.current) fileRef.current.value = ""; if (coverRef.current) coverRef.current.value = ""; }
   };
@@ -867,12 +873,21 @@ function AdminProjects({ projects, onSave }: { projects: Project[]; onSave: (p: 
   const [isNew, setIsNew] = useState(false);
   const [tagInput, setTagInput] = useState("");
   const [dc, setDc] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const imgRef = useRef<HTMLInputElement>(null);
 
   const startNew = () => { setEditing({ id: crypto.randomUUID(), title: "", category: "Brand Identity", year: new Date().getFullYear().toString(), description: "", imageUrl: "", tags: [], featured: false }); setIsNew(true); };
   const save = () => { if (!editing) return; const upd = isNew ? [...list, editing] : list.map((p) => p.id === editing.id ? editing : p); setList(upd); onSave(upd); setEditing(null); };
   const del = (id: string) => { const upd = list.filter((p) => p.id !== id); setList(upd); onSave(upd); setDc(null); };
   const addTag = () => { if (!tagInput.trim() || !editing) return; setEditing({ ...editing, tags: [...editing.tags, tagInput.trim()] }); setTagInput(""); };
   const removeTag = (t: string) => { if (!editing) return; setEditing({ ...editing, tags: editing.tags.filter((x) => x !== t) }); };
+  const handleImgUpload = async (files: FileList | null) => {
+    if (!files?.[0] || !editing) return;
+    setUploading(true);
+    try { const url = await uploadFile(files[0]); setEditing({ ...editing, imageUrl: url }); }
+    catch (e: any) { alert("Upload gagal: " + (e?.message ?? "")); }
+    finally { setUploading(false); if (imgRef.current) imgRef.current.value = ""; }
+  };
 
   return (
     <div className="flex h-full overflow-hidden">
@@ -897,7 +912,14 @@ function AdminProjects({ projects, onSave }: { projects: Project[]; onSave: (p: 
             <AF label="Title *"><input value={editing.title} onChange={(e) => setEditing({ ...editing, title: e.target.value })} className={IC} style={{ fontFamily: "Inter" }} placeholder="Project title" /></AF>
             <AF label="Category"><select value={editing.category} onChange={(e) => setEditing({ ...editing, category: e.target.value })} className={IC} style={{ fontFamily: "Inter" }}>{CATS.filter((c) => c !== "All").map((c) => <option key={c} value={c} style={{ backgroundColor: "#141313" }}>{c}</option>)}</select></AF>
             <AF label="Year"><input value={editing.year} onChange={(e) => setEditing({ ...editing, year: e.target.value })} className={IC} style={{ fontFamily: "Inter" }} placeholder="2025" /></AF>
-            <AF label="Image URL"><input value={editing.imageUrl} onChange={(e) => setEditing({ ...editing, imageUrl: e.target.value })} className={IC} style={{ fontFamily: "Inter" }} placeholder="https://…" />{editing.imageUrl && <div className="mt-2 aspect-video bg-[#1c1b1b] overflow-hidden"><img src={editing.imageUrl} alt="" className="w-full h-full object-cover" /></div>}</AF>
+            <AF label="Gambar Project">
+              <input ref={imgRef} type="file" accept="image/*" className="hidden" onChange={(e) => handleImgUpload(e.target.files)} />
+              <button onClick={() => imgRef.current?.click()} disabled={uploading} className="flex items-center gap-2 border border-white/[0.08] px-3 py-2 text-xs text-[#8e9192] hover:text-white hover:border-white/30 transition-colors w-full justify-center mb-2" style={{ fontFamily: "Inter" }}>
+                {uploading ? <><Loader size={12} className="animate-spin" /> Mengompres…</> : <><Upload size={12} /> Upload dari Komputer</>}
+              </button>
+              <input value={editing.imageUrl} onChange={(e) => setEditing({ ...editing, imageUrl: e.target.value })} className={IC} style={{ fontFamily: "Inter" }} placeholder="Atau paste URL gambar…" />
+              {editing.imageUrl && <div className="mt-2 aspect-video bg-[#1c1b1b] overflow-hidden"><img src={editing.imageUrl} alt="" className="w-full h-full object-cover" /></div>}
+            </AF>
             <AF label="Description"><textarea value={editing.description} onChange={(e) => setEditing({ ...editing, description: e.target.value })} rows={3} className={`${IC} resize-none`} style={{ fontFamily: "Inter" }} /></AF>
             <AF label="Tags">
               <div className="flex gap-2 mb-2"><input value={tagInput} onChange={(e) => setTagInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addTag())} className="flex-1 bg-[#141313] border border-white/[0.08] px-3 py-2 text-sm text-white outline-none" style={{ fontFamily: "Inter" }} placeholder="Add tag…" /><button onClick={addTag} className="bg-white/10 border border-white/[0.08] px-3 py-2 text-[#8e9192] hover:text-white"><Plus size={14} /></button></div>
@@ -1044,7 +1066,7 @@ function AdminPanel({ projects, onSaveProjects, cv, onSaveCV, showcases, onSaveS
 // ─── App Root ─────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const { projects, cv, showcases, heroPhoto, ready, saveProjects, saveCV, saveShowcases, saveHeroPhoto } = useData();
+  const { projects, cv, showcases, heroPhoto, ready, saveError, saveProjects, saveCV, saveShowcases, saveHeroPhoto } = useData();
   const [active, setActive] = useState("hero");
   const [showLogin, setShowLogin] = useState(false);
   const [authed, setAuthed] = useState(false);
@@ -1064,13 +1086,23 @@ export default function App() {
 
   if (!ready) return (
     <div className="fixed inset-0 bg-[#0e0e0e] flex items-center justify-center">
-      <div className="text-center"><Loader size={24} className="text-white/30 animate-spin mx-auto mb-4" /><p className="text-xs tracking-[0.1em] uppercase text-[#444748]" style={{ fontFamily: "Inter" }}>Loading</p></div>
+      <div className="text-center"><Loader size={24} className="text-white/30 animate-spin mx-auto mb-4" /><p className="text-xs tracking-[0.1em] uppercase text-[#444748]" style={{ fontFamily: "Inter" }}>Memuat data…</p></div>
     </div>
   );
 
   return (
     <div className="min-h-screen bg-[#0e0e0e] text-[#e5e2e1] relative">
       <Grid />
+
+      {/* Supabase RLS warning — only visible in admin mode */}
+      {saveError && authed && (
+        <div className="fixed top-16 left-0 right-0 z-40 bg-red-900/80 border-b border-red-700/50 px-6 py-2 flex items-center gap-3">
+          <p className="text-xs text-red-200 flex-1" style={{ fontFamily: "Inter" }}>
+            ⚠ Data tidak tersimpan ke Supabase. Jalankan SQL ini: <code className="bg-red-800/60 px-2 py-0.5 rounded text-red-100">ALTER TABLE kv_store_1edba938 DISABLE ROW LEVEL SECURITY;</code>
+          </p>
+        </div>
+      )}
+
       <div className="relative z-10">
         <Nav active={active} onNav={nav} />
         <Hero heroPhoto={heroPhoto} onNav={nav} />
